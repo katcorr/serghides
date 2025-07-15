@@ -40,7 +40,15 @@ options(knitr.kable.NA = '--')
 ```{r}
 #| label: import-dat
 
-paco <- read_excel("data for Kat.xlsx")
+paco <- read_excel("Data/data for Kat.xlsx")
+
+# define which biomarkers to include
+biomarkers <- paco |>
+  select(ends_with("pg_ml"), shbg_nmol_l) |>
+  colnames()
+
+# define which placental outcomes to include (networks will be stratified by these)
+placenta_outcomes <- c("villous_surface_density", "villous_volume", "placenta_weight_kg")
 
 #count(paco, hiv)
 #count(paco, treatment)
@@ -89,14 +97,6 @@ KAT need to fix:
 #ggplot(data=paco, aes(x=plgf_pg_ml)) + geom_density()
 #ggplot(data=paco, aes(x=plgf_pg_ml, color=treatment)) + geom_density()
 #ggplot(data=paco, aes(x=plgf_pg_ml, y=ang1_pg_ml)) + geom_point()
-
-# define which biomarkers to include
-biomarkers <- paco |>
-  select(ends_with("pg_ml"), shbg_nmol_l) |>
-  colnames()
-
-# define which placental outcomes to include (networks will be stratified by these)
-placenta_outcomes <- c("villous_surface_density", "villous_volume", "placenta_weight_kg")
 
 corrs_overall0 <- paco |>
   select(all_of(biomarkers), all_of(placenta_outcomes)) |>
@@ -445,6 +445,7 @@ library(glmnet)
 set.seed(86)
 
 #https://www.r-bloggers.com/2020/05/quick-tutorial-on-lasso-regression-with-example/
+#https://glmnet.stanford.edu/articles/glmnet.html#linear-regression-family-gaussian-default
 
 vsd <- paco |>
   select(all_of(biomarkers), placenta_outcomes[1]) |>
@@ -459,7 +460,6 @@ apply(vsd, 2, sd)
 
 all_vars_vsd <- c(biomarkers, placenta_outcomes[1]) 
 lasso_coef_b <- data.frame(predictor=NA, outcome=NA, s0=NA)
-lambda_seq <- 10^seq(2, -2, by = -.1)
 
 for (i in 1:length(all_vars_vsd)){
   # x vars need to be in matrix form
@@ -468,8 +468,9 @@ for (i in 1:length(all_vars_vsd)){
   y_var <- vsd[,all_vars_vsd[i]]
 
   cv_output <- cv.glmnet(x_vars, y_var,
-                         alpha = 1, lambda = lambda_seq, 
-                         nfolds = 5)
+                         alpha = 1, nlambda = 100,
+                         type.measure = "mse",
+                         nfolds = 20)
 
   # identifying best lamda
   best_lam <- cv_output$lambda.min
@@ -477,7 +478,6 @@ for (i in 1:length(all_vars_vsd)){
 
   best_mod <- glmnet(x_vars, y_var, alpha = 1, lambda = best_lam)
 
-  # none are 0!
   lasso_coef_a <- coef(best_mod) |>
     as.matrix() |>
     as.data.frame() |>
@@ -498,14 +498,12 @@ lasso_coef <- lasso_coef_b |>
   filter(abs(s0) > 0)
 ```
 
-
-
 \newpage
 # graphical lasso (adjusted correlations)
 ## overall
 
 ```{r}
-#| label: graphical-lasso-overall
+#| label: graphical-lasso-fit-overall
 
 library(glasso)
 
@@ -541,26 +539,94 @@ glasso_overall
 # w - Estimated covariance matrix
 # wi - Estimated inverse covariance matrix
 # loglik - Value of maximized log-likelihood+penalty
-# BUT that doesn't make sense because there are negative values in w and wi!
 
-lambda_set <- c(0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1)
-logliks <- rep(NA, length(lambda_set))
-for (lambda in lambda_set){
-  glasso_overall_l <- glasso(s = covmat_vsd
-                           # set to NO regularization to start
-                           # later use cross-validation to choose the reg. param.?
-                           # this returns all nonzero covariance params because 
-                           # no regularization . . .
-                           , rho = lambda
-                           , nobs = 86)
+# lambda_set <- c(0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1)
+# logliks <- rep(NA, length(lambda_set))
+# for (lambda in lambda_set){
+#   glasso_overall_l <- glasso(s = covmat_vsd
+#                            # set to NO regularization to start
+#                            # later use cross-validation to choose the reg. param.?
+#                            # this returns all nonzero covariance params because 
+#                            # no regularization . . .
+#                            , rho = lambda
+#                            , nobs = 86)
+#   
+#   logliks[which(lambda_set==lambda)] <- glasso_overall_l$loglik
+# }
+# 
+# logliks
+# 
+# glasso_overall$loglik
+# glasso_overall_p1$loglik
+```
+
+```{r}
+#| label: graphical-lasso-plot-overall
+
+# need to figure out how to identify best lambda to use for the glasso function
+# but for now code a figure based on the format of the glasso output
+
+glasso_overall 
+
+# glasso documentation says this returns:
+# w - Estimated covariance matrix  (since I standardized the vars, the w's are the corrs)
+# wi - Estimated inverse covariance matrix
+# loglik - Value of maximized log-likelihood+penalty
+
+# https://en.wikipedia.org/wiki/Partial_correlation
+
+inv_sig <- glasso_overall$wi
+
+vars_vsd <- diag(diag(inv_sig), 10,10)
+
+pcorrs_vsd <- sqrt(solve(vars_vsd)) %*% inv_sig %*% sqrt(solve(vars_vsd))
+
+
+glasso_overall_w0 <- glasso_overall$wi |>
+  as_tibble() |>
+  mutate(var = all_vars_vsd) 
+
+names(glasso_overall_w0) <- c(all_vars_vsd, "var")
+
+glasso_overall_w <- glasso_overall_w0 |>
+    pivot_longer(cols=-var, names_to="var2", values_to="pcorr") |>
+    filter(var < var2) 
   
-  logliks[which(lambda_set==lambda)] <- glasso_overall_l$loglik
-}
+# create network object
+glasso_overall_network <- glasso_overall_w |>
+  # vsd (Y) is not a node in the graph; rather each biomarker's node will
+  # be colored/sized by its partial correlation with VSD (so any correlations)
+  # with VSD are node attributes, NOT edges
+  filter(var != placenta_outcomes[1] & var2 != placenta_outcomes[1]) |>
+  as_tbl_graph(directed = FALSE) |>
+  activate(nodes) |>
+  left_join(glasso_overall_w |>
+              filter(var == placenta_outcomes[1] | var2 == placenta_outcomes[1]) |>
+              select(var, pcorr_vsd=pcorr)
+            , by=c("name"="var"))
 
-logliks
+# plot network (the graphical lasso)
+glasso_overall_plot <- ggraph(glasso_overall_network) + 
+  geom_edge_link(aes(edge_color = pcorr)) + #, edge_alpha = 0.8, ) + 
+  geom_node_point(aes(size = pcorr_vsd
+                      , color = pcorr_vsd)
+                  , show.legend = FALSE) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  # Had to add `base_family` argument due to error with fonts loading for PDF
+  theme_graph(base_family = "sans") +
+  labs(title="Villous Surface Density") +
+  scale_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.6, 0.6)) +
+  scale_edge_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.6, 0.6)) 
 
-glasso_overall$loglik
-glasso_overall_p1$loglik
+glasso_overall_plot
+
+# since no regularization, should just equal the partial correlation.
+# but they don't seem to be ... hmmm ... some very off ...
+# NOW THE NUMBERS MATCH IF DO THE computation
+# sqrt(solve(vars_vsd)) %*% inv_sig %*% sqrt(solve(vars_vsd))
+# where inv_sig is the glasso wi output
+# BUT THE SIGNS ARE EXACTLY THE OPPOSITE?!
+ppcor::pcor(vsd)
 ```
 
 \newpage

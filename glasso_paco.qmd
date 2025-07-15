@@ -1,0 +1,221 @@
+---
+title: "glasso_paco"
+format: pdf
+header-includes: 
+- \usepackage{booktabs}
+- \usepackage{longtable}
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| eval: true
+
+# author: kat 
+# date: 07/15/2025
+# purpose: fit graphical lasso to create network visualization of partial 
+#              correlations between biomarkers by treatment group
+
+
+knitr::opts_chunk$set(eval=TRUE
+                      , echo=FALSE
+                      , message=FALSE
+                      , warning=FALSE)
+#rm(list=ls())
+
+library(readxl)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggpubr)
+library(glasso)
+
+options(knitr.kable.NA = '--')
+```
+
+```{r}
+#| label: import-dat
+
+paco <- read_excel("Data/data for Kat.xlsx")
+
+# define which biomarkers to include
+biomarkers <- paco |>
+  select(ends_with("pg_ml"), shbg_nmol_l) |>
+  colnames()
+
+# ends_with("ng_ml")
+
+# define which placental outcomes to include (separate networks for each)
+placenta_outcomes <- c("villous_surface_density", "villous_volume", "placenta_weight_kg")
+```
+
+!!!
+
+ERROR: These partial correlations are NOT CORRECT YET. 
+
+They're based on graphical lasso with the regularization parameter set to 0 (no regularization), so all edges are realized. There is a also a warning given from the glasso function (because of no regularization yet):
+Warning message:
+In glasso(s = covmat, rho = 0, nobs = nrow(dat)) :
+  With rho=0, there may be convergence problems if the input matrix 
+ is not of full rank
+ 
+They also likely have the WRONG SIGN (+/-). 
+
+Edge and node attributes (colors and connections) will change once fixed.
+
+!!!
+
+```{r}
+#| label: glasso-a
+#| include: false
+
+#ggplot(data=paco, aes(x=villous_surface_density)) + geom_density()
+#ggplot(data=paco, aes(x=villous_volume)) + geom_density()
+
+get_pcorr <- function(outc,grp){
+  
+  all_vars <- c(biomarkers, placenta_outcomes[outc])
+ 
+  # (1.) compute covariance matrix
+  if (is.na(grp)){
+    dat <- paco |>
+      select(all_of(all_vars)) |>
+      # Need to do case-wise deletion (remove completely if missing one value)
+      # because need to give a single sample size in glasso function
+      na.omit()
+  } else {
+    dat <- paco |>
+      filter(treatment == grp) |>
+      select(all_of(all_vars)) |>
+      # Need to do case-wise deletion (remove completely if missing one value)
+      # because need to give a single sample size in glasso function
+      na.omit()
+  }  
+  
+  covmat <- dat |>
+    cov(use="complete.obs") 
+  
+  print(nrow(dat))
+  
+  # (2.) fit model using glasso function
+  # from https://cran.r-project.org/web/packages/glasso/glasso.pdf
+  # s - Covariance matrix:p by p matrix (symmetric)
+  
+  # rho (Non-negative) - regularization parameter for lasso. rho=0 means no 
+  #regularization. Can be a scalar (usual) or a symmetric p by p matrix, or a vector #of 
+  # length p. In the latter case, the penalty matrix has jkth element sqrt(rho[j]*rho[k]).
+  
+  # nobs - Number of observations used in computation of the covariance matrix s. This
+  #quantity is need to compute the value of log-likelihood. If not specified, loglik
+  #will be returned as NA.
+  
+  glasso_fit <- glasso(s = covmat
+                   # set to NO regularization to start
+                   # later use cross-validation to choose the reg. param.?
+                   # this returns all nonzero covariance params because
+                   # no regularization . . .
+                   , rho = 0
+                   , nobs = nrow(dat))
+
+  # (3.) compute the partial correlation from the glasso function output
+  # glasso documentation says this function returns:
+  # w - Estimated covariance matrix  
+  # wi - Estimated inverse covariance matrix
+  # loglik - Value of maximized log-likelihood+penalty
+
+  # https://en.wikipedia.org/wiki/Partial_correlation
+
+  n_vars <- length(all_vars)
+  inv_sig <- glasso_fit$wi
+  variance_diag <- diag(diag(inv_sig), n_vars, n_vars)
+  #print(inv_sig)
+  #print(variance_diag)
+  
+  pcorrs <- sqrt(solve(variance_diag)) %*% inv_sig %*% sqrt(solve(variance_diag))
+  print(pcorrs)
+  
+  # (4.) Create the network object
+  colnames(pcorrs) <- all_vars
+  pcorrs_network0 <- pcorrs |>
+    as_tibble() |>
+    mutate(var1 = all_vars) |>
+    pivot_longer(cols=-var1, names_to="var2", values_to="pcorr") |>
+    filter(var1 < var2)
+  
+  print(min(pcorrs_network0$pcorr))
+  print(max(pcorrs_network0$pcorr))
+  
+  pcorrs_network <- pcorrs_network0 |>
+    # Y is not a node in the graph; rather each biomarker's node will
+    # be colored/sized by its partial correlation with Y (so any correlations)
+    # with Y are node attributes, NOT edge attributes)
+    filter(var1 != placenta_outcomes[outc] & var2 != placenta_outcomes[outc]) |>
+    as_tbl_graph(directed = FALSE) |>
+    activate(nodes) |>
+    left_join(pcorrs_network0 |>
+                filter(var1 == placenta_outcomes[outc] | 
+                         var2 == placenta_outcomes[outc]) |>
+                select(var1, pcorr_outcome=pcorr)
+              , by=c("name"="var1"))
+
+  # (5.) Create the network visualization 
+  pcorrs_viz <- ggraph(pcorrs_network) + 
+    geom_edge_link(aes(edge_color = pcorr)) + #, edge_alpha = 0.8, ) + 
+    geom_node_point(aes(size = abs(pcorr_outcome)
+                        , color = pcorr_outcome)
+                    , show.legend = FALSE) +
+    geom_node_text(aes(label = name), repel = TRUE) +
+    # Had to add `base_family` argument due to error with fonts loading for PDF
+    theme_graph(base_family = "sans"
+                , caption_size = 10) +
+    #labs(title=paste0(outc_labels[outc], ": ", grp)) +
+    #labs(title=outc_labels[outc]) +
+    labs(caption=grp) +
+    scale_color_distiller(palette="RdYlGn"
+                          , direction=1
+                          , limits=c(-0.7, 0.7)
+                          , breaks=c(-0.7, -0.4, -0.1, 0.1, 0.4, 0.7)) +
+    scale_edge_color_distiller(palette="RdYlGn"
+                               , direction=1
+                               , limits=c(-0.7, 0.7)
+                               , breaks=c(-0.7, -0.4, -0.1, 0.1, 0.4, 0.7)) 
+
+  return(pcorrs_viz)
+}
+
+outc_labels <- c("Villous Surface Density", "Villous Volume", "Placenta Weight")
+
+# THINK STILL RETURNING PCORRS THAT ARE OPPOSITE SIGN THAN SHOULD BE. WHY!?
+plot_vsd_ctrl <- get_pcorr(outc=1, grp="Control") # n = 40
+plot_vsd_INSTI <- get_pcorr(outc=1, grp="INSTI")   # n = 19
+plot_vsd_PrEP <- get_pcorr(outc=1, grp="PrEP")    # n = 27
+
+# since no regularization, should just equal the partial correlation.
+# but they don't seem to be ... hmmm ... some very off ...
+# NOW THE NUMBERS MATCH IF DO THE computation
+# sqrt(solve(vars_vsd)) %*% inv_sig %*% sqrt(solve(vars_vsd))
+# where inv_sig is the glasso wi output
+# BUT THE SIGNS ARE EXACTLY THE OPPOSITE?! WHY!?
+test_ctrl <- paco |>
+  filter(treatment == "Control") |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  na.omit()
+
+print("Partial Correlations from pcor function in ppcor package - control grp:")
+ppcor::pcor(test_ctrl)
+```
+
+```{r}
+#| label: glasso-b
+#| fig-width: 7
+#| fig-height: 10
+
+ggarrange(plot_vsd_ctrl, plot_vsd_INSTI, plot_vsd_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
+```
