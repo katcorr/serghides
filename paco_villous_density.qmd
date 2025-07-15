@@ -1,0 +1,570 @@
+---
+title: "paco_villous_density"
+format: pdf
+header-includes: 
+- \usepackage{booktabs}
+- \usepackage{longtable}
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| eval: true
+
+# author: kat 
+# date: 07/10/2025
+# purpose: import data lena serghides sent, (if needed) wrangle data,
+#              create summary tables to ensure data imported correctly, 
+#              and create visualizations of relationships between measures 
+#              and density (e.g., network)
+
+
+knitr::opts_chunk$set(eval=TRUE
+                      , echo=FALSE
+                      , message=FALSE
+                      , warning=FALSE)
+#rm(list=ls())
+
+library(readxl)
+library(tidyverse)
+library(gtsummary)
+library(kableExtra)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggpubr)
+
+options(knitr.kable.NA = '--')
+```
+
+```{r}
+#| label: import-dat
+
+paco <- read_excel("data for Kat.xlsx")
+
+#count(paco, hiv)
+#count(paco, treatment)
+#count(paco, hiv, treatment)
+
+tbl <- paco |>
+  select(-id) |>
+  tbl_summary(
+    by="treatment"
+    , type = all_continuous() ~ "continuous2"
+    , statistic = all_continuous() ~ c(
+      "{mean} ({sd})"
+      , "{median} ({p25}, {p75})"
+      , "{min}, {max}"
+      )
+    )
+
+#https://www.danieldsjoberg.com/gtsummary/articles/rmarkdown.html
+as_kable_extra(tbl, format = "latex", longtable=TRUE, booktabs=TRUE) |>
+    kable_styling(latex_options = "repeat_header")
+```
+
+\newpage
+# networks based on (unadjusted) correlations
+## overall
+
+Only correlations > 0.10 (in absolute value) have edges retained.
+
+QUESTIONS:
+
+1. reason for missing values? right now using pairwise complete obs (e.g., different n can contribute to each correlation); should we use other approach? depends on likely missingness mechanism
+    - for markers: 10/33 missing in INTRI group, 8/36 missing in PrEP, and 0/44 in controls
+    - for placenta measures, differs but < 5 in each group (but still >10% sometimes)
+    
+2. do you want to consider statistical significance at all? e.g. determine based on n
+what p-value would be stat sig (also: adjust that p-value threshold for multiple testing? probably would lose all power)
+
+
+KAT need to fix:
+
+- get biomarker placement same across groups so consistent
+
+```{r}
+#| label: network-overall-setup
+
+#ggplot(data=paco, aes(x=plgf_pg_ml)) + geom_density()
+#ggplot(data=paco, aes(x=plgf_pg_ml, color=treatment)) + geom_density()
+#ggplot(data=paco, aes(x=plgf_pg_ml, y=ang1_pg_ml)) + geom_point()
+
+# define which biomarkers to include
+biomarkers <- paco |>
+  select(ends_with("pg_ml"), shbg_nmol_l) |>
+  colnames()
+
+# define which placental outcomes to include (networks will be stratified by these)
+placenta_outcomes <- c("villous_surface_density", "villous_volume", "placenta_weight_kg")
+
+corrs_overall0 <- paco |>
+  select(all_of(biomarkers), all_of(placenta_outcomes)) |>
+  cor(use="pairwise.complete.obs") |>
+  as_tibble() 
+
+corrs_overall <- corrs_overall0 |>
+  mutate(var = names(corrs_overall0)) |>
+  pivot_longer(cols=-var, names_to="var2", values_to="corr") |>
+  filter(var != var2)
+
+# create as network object
+# with edges between each var and edge weights being the correlations
+# (then can delete any edges with correlation less than some threshold value...)
+# node attributes include correlation with main outcome var
+
+# nodes will be each of the biomarkers (cytokines and hormones)
+
+biomarker_combos <- combn(biomarkers, 2) |>
+  t() |>
+  as_tibble() |>
+  # only keep the correlations between biomarkers (and not duplicated)
+  left_join(corrs_overall, by=c("V1"="var", "V2"="var2"))
+
+network_overall0 <-  as_tbl_graph(biomarker_combos, directed = FALSE) 
+#network_overall0
+#vcount(network_overall0)
+#ecount(network_overall0)
+
+# a node attribute will be the node's correlation with placenta outcomes
+dat_node_attributes <- corrs_overall |>
+  filter(var %in% placenta_outcomes & !(var2 %in% placenta_outcomes)) |>
+  pivot_wider(id_cols="var2", names_from="var", values_from="corr")
+
+network_overall <- network_overall0 |>
+  activate(nodes) |>
+  left_join(dat_node_attributes, by=c("name" = "var2")) |>
+  mutate(name_long = name
+         , name = str_replace(str_replace(name_long, "_pg_ml", "")
+                                  , "_nmol_l", "")) |>
+  activate(edges) |>
+  # remove edges with |corr| < 0.10
+  filter(abs(corr) > 0.10)
+
+#network_overall
+#summary(network_overall)
+```
+
+```{r}
+#| label: network-overall-plots
+#| fig-width: 8
+#| fig-height: 10
+
+network_plot_vsd <- ggraph(network_overall) + 
+  geom_edge_link(aes(edge_color = corr)) + #, edge_alpha = 0.8, ) + 
+  geom_node_point(aes(size = villous_surface_density
+                      , color = villous_surface_density)
+                  , show.legend = FALSE) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  # Had to add `base_family` argument due to error with fonts loading for PDF
+  theme_graph(base_family = "sans") +
+  labs(title="Villous Surface Density") +
+  scale_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) +
+  scale_edge_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) 
+  
+network_plot_vv <- ggraph(network_overall) + 
+  geom_edge_link(aes(edge_color = corr)) + #, edge_alpha = 0.8, ) + 
+  geom_node_point(aes(size = villous_volume
+                      , color = villous_volume)
+                  , show.legend = FALSE) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  # Had to add `base_family` argument due to error with fonts loading for PDF
+  theme_graph(base_family = "sans") +
+  labs(title="Villous Volume") +
+  scale_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) +
+  scale_edge_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) 
+
+network_plot_pw <- ggraph(network_overall) + 
+  geom_edge_link(aes(edge_color = corr)) + #, edge_alpha = 0.8, ) + 
+  geom_node_point(aes(size = placenta_weight_kg
+                      , color = placenta_weight_kg)
+                  , show.legend = FALSE) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  # Had to add `base_family` argument due to error with fonts loading for PDF
+  theme_graph(base_family = "sans") +
+  labs(title="Placenta Weight") +
+  scale_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) +
+  scale_edge_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.35, 0.35)) 
+
+network_plot_overall <- ggarrange(network_plot_vsd
+                                  , network_plot_vv
+                                  , network_plot_pw
+                                  , ncol=1
+                                  , common.legend=TRUE
+                                  , legend="bottom")
+
+network_plot_overall
+```
+
+# networks based on (unadjusted) correlations
+## by treatment group
+
+```{r}
+#| label: network-grp-setup
+
+create_network_bygroup <- function(grp){
+  
+  # get correlations for group of interest
+  corrs_bygrp0 <- paco |>
+    filter(treatment==grp) |>
+    select(all_of(biomarkers), all_of(placenta_outcomes)) |>
+    cor(use="pairwise.complete.obs") |>
+    as_tibble() 
+
+  corrs_bygrp <- corrs_bygrp0 |>
+    mutate(var = names(corrs_bygrp0)) |>
+    pivot_longer(cols=-var, names_to="var2", values_to="corr") |>
+    filter(var != var2) 
+  
+  # create network objects
+  network_bygrp0 <-  corrs_bygrp |>
+    right_join(biomarker_combos |> select(-corr)
+               , by=c("var"="V1", "var2"="V2")) |>
+    as_tbl_graph(directed = FALSE) 
+  #network_bygrp0
+  #vcount(network_bygrp0)
+  #ecount(network_bygrp0)
+  
+  # a node attribute will be the node's correlation with placenta outcomes
+  dat_grp_node_attributes <- corrs_bygrp |>
+    filter(var %in% placenta_outcomes & !(var2 %in% placenta_outcomes)) |>
+    pivot_wider(id_cols="var2", names_from="var", , values_from="corr")
+
+  network_bygrp <- network_bygrp0 |>
+    activate(nodes) |>
+    left_join(dat_grp_node_attributes, by=c("name" = "var2")) |>
+    mutate(name_long = name
+         , name = str_replace(str_replace(name_long, "_pg_ml", "")
+                                  , "_nmol_l", "")) |>
+    activate(edges) |>
+    # remove edges with |corr| < 0.10
+    filter(abs(corr) > 0.10)
+
+  #network_bygrp
+  #summary(network_bygrp)
+  return(network_bygrp)
+}
+
+network_control <- create_network_bygroup(grp="Control")
+#network_control
+
+network_insti <- create_network_bygroup(grp="INSTI")
+#network_insti
+
+network_prep <- create_network_bygroup(grp="PrEP")
+#network_prep
+```
+
+```{r}
+#| label: network-bygrp-plots
+#| fig-width: 8
+#| fig-height: 10
+
+create_plot_bygrp <- function(dat_grp, outcome, cpt){
+
+  ggraph(dat_grp) + 
+    geom_edge_link(aes(edge_color = corr)) + #, edge_alpha = 0.8, ) + 
+    geom_node_point(aes(size = {{ outcome }}
+                        , color = {{ outcome }})
+                    , show.legend = FALSE) +
+    geom_node_text(aes(label = name), repel = TRUE) +
+    # Had to add `base_family` argument due to error with fonts loading for PDF
+    theme_graph(base_family = "sans") +
+    labs(#title=ttl, 
+          caption=cpt) +
+    scale_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.80, 0.80)) +
+    scale_edge_color_distiller(palette="RdYlGn", direction=1, limits=c(-0.80, 0.80)) 
+  
+}
+  
+# VILLOUS SURFACE DENSITY
+plot_control_vsd <- create_plot_bygrp(dat_grp=network_control
+                                      , outcome=villous_surface_density
+                                      , cpt="Control")
+                                      #, ttl="Villous Surface Density")
+
+plot_insti_vsd <- create_plot_bygrp(dat_grp=network_insti
+                                    , outcome=villous_surface_density
+                                    , cpt="INSTI")
+                                      #, ttl="")
+
+plot_prep_vsd <- create_plot_bygrp(dat_grp=network_prep
+                                   , outcome=villous_surface_density
+                                   , cpt="PrEP")
+                                   #, ttl="")
+
+# VILLOUS VOLUME
+plot_control_vv <- create_plot_bygrp(dat_grp=network_control
+                                     , outcome=villous_volume
+                                     , cpt="Control")
+                                    #, ttl="Villous Volume")
+
+plot_insti_vv <- create_plot_bygrp(dat_grp=network_insti
+                                   , outcome=villous_volume
+                                   , cpt="INSTI")
+                                    #, ttl="")
+
+plot_prep_vv <- create_plot_bygrp(dat_grp=network_prep
+                                  , outcome=villous_volume
+                                  , cpt="PrEP")
+                                  #, ttl="")
+
+# PLACENTA WEIGHT
+plot_control_pw <- create_plot_bygrp(dat_grp=network_control
+                                     , outcome=placenta_weight_kg
+                                     #, ttl="Placenta Weight"
+                                     , cpt="Control")
+
+plot_insti_pw <- create_plot_bygrp(dat_grp=network_insti
+                                   , outcome=placenta_weight_kg
+                                   #, ttl=""
+                                   , cpt="INSTI")
+
+plot_prep_pw <- create_plot_bygrp(dat_grp=network_prep
+                                  , outcome=placenta_weight_kg
+                                  #, ttl=""
+                                  , cpt="PrEP")
+
+network_plot_bygrp <- ggarrange(plot_control_vsd
+                                , plot_insti_vsd
+                                , plot_prep_vsd
+                                , plot_control_vv
+                                , plot_insti_vv
+                                , plot_prep_vv
+                                , plot_control_pw
+                                , plot_insti_pw
+                                , plot_prep_pw
+                                , ncol=3, nrow=3
+                                , common.legend=TRUE
+                                , legend="bottom"
+                                , labels=c("", "Villous Surface Density", ""
+                                           , "", "Villous Volume", ""
+                                           , "", "Placenta Weight", ""))
+
+network_plot_bygrp
+```
+
+\newpage
+# Meinhausen–Buhlmann approximation
+## overall
+
+In Gaussian Graphical Models:
+
+- estimate covariance matrix, then compute correlations (so need to use only
+complete cases)
+- network includes only edges between vertices where the correlation is statistically significant
+
+For sparse Gaussian graphical models (Reference: Meinshausen and Buhlmann, Annals of Statistics, 2006):
+
+- fit lasso model to each variable, using the others as predictors
+- covariance is estimated to be nonzero (and an edge is included on the gaph) if the estimated coefficient of variable i on j is nonzero or the estimated coefficient of variable j on i is nonzero
+
+For graphical lasso (Reference: Friedman, Hastie, and Tibshirani, Biostatistics, 2008):
+
+- presented as a fast algorithm to estimate a sparse inverse covariance matrix using an L_1 penalty
+- instead of p separate regularized regression probelms, fits p coupled lasso problems that "share the same W" 
+
+```{r}
+#| label: explore-missing
+#| eval: false
+
+library(mice)
+
+# 74 obs with complete data
+md.pattern(paco, rotate.names=TRUE)
+
+# could try full information maximum likelihood (FIML) so can use all 113 obs?
+
+# n=86 complete cases for villous surface density 
+paco |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  md.pattern(rotate.names=TRUE)
+
+# n=86 complete cases for villous volume 
+paco |>
+  select(all_of(biomarkers), placenta_outcomes[2]) |>
+  md.pattern(rotate.names=TRUE)
+
+# n=95 for placenta weight
+paco |>
+  select(all_of(biomarkers), placenta_outcomes[3]) |>
+  md.pattern(rotate.names=TRUE)
+```
+
+```{r}
+#| label: gaussian-graphical-model-overall
+#| eval: false
+
+# first, compute covariance matrix
+covmat_vsd <- paco |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  # remove completely if missing one value
+  na.omit() |>
+  cov() 
+
+vars_vsd <- diag(diag(covmat_vsd), 10,10)
+# "solve" is the command to take the inverse of a matrix
+corrs_vsd <- sqrt(solve(vars_vsd)) %*% covmat_vsd %*% sqrt(solve(vars_vsd))
+
+# good, gives same exact as cor function (Pearson's corr)
+paco |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  # remove completely if missing one value
+  na.omit() |>
+  cor() 
+
+# given a sample size of 86, estimate what the correlation needs to be to be
+# statistically significant at the alpha = 0.05 level (not even accounting for
+# multiple testing...)
+cor.test(paco$plgf_pg_ml, paco$ang1_pg_ml)
+cor.test(paco$shbg_nmol_l, paco$ang1_pg_ml)
+
+rset <- seq(0,0.95,0.05)
+n <- 86
+tval <- rep(NA, times=length(rset))
+pval <- rep(NA, times=length(rset))
+for (r in rset){
+  tval[which(rset==r)] <- (r*sqrt(n-2))/(sqrt(1-r^2))
+  pval[which(rset==r)] <- 1-pt(q=abs(tval[which(rset==r)]), df=2)
+}
+tval 
+pval
+ggplot(data.frame(rset, pval), aes(x=rset, y=pval)) +
+  geom_point() +
+  geom_hline(yintercept = 0.05)
+```
+
+```{r}
+#| label: m-h approx
+
+#fit lasso model to each variable, using the others as predictors
+#covariance is estimated to be nonzero (and an edge is included on the gaph) if the estimated coefficient of variable i on j is nonzero or the estimated coefficient of variable j on i is nonzero
+
+library(glmnet)
+
+set.seed(86)
+
+#https://www.r-bloggers.com/2020/05/quick-tutorial-on-lasso-regression-with-example/
+
+vsd <- paco |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  # remove completely if missing one value
+  na.omit() |>
+  # STANDARDIZE ALL VARIABLES SO COVARIANCE = CORRELATION!
+  scale()
+
+# confirm standardized with mean 0 and sd 1
+colMeans(vsd) 
+apply(vsd, 2, sd)
+
+all_vars_vsd <- c(biomarkers, placenta_outcomes[1]) 
+lasso_coef_b <- data.frame(predictor=NA, outcome=NA, s0=NA)
+lambda_seq <- 10^seq(2, -2, by = -.1)
+
+for (i in 1:length(all_vars_vsd)){
+  # x vars need to be in matrix form
+  x_vars <- vsd[,  -which(colnames(vsd) == all_vars_vsd[i])]
+  # grab just the column of interest for y and make it a vector
+  y_var <- vsd[,all_vars_vsd[i]]
+
+  cv_output <- cv.glmnet(x_vars, y_var,
+                         alpha = 1, lambda = lambda_seq, 
+                         nfolds = 5)
+
+  # identifying best lamda
+  best_lam <- cv_output$lambda.min
+  best_lam
+
+  best_mod <- glmnet(x_vars, y_var, alpha = 1, lambda = best_lam)
+
+  # none are 0!
+  lasso_coef_a <- coef(best_mod) |>
+    as.matrix() |>
+    as.data.frame() |>
+    rownames_to_column(var="predictor") |>
+    # remove intercept line
+    filter(predictor != "(Intercept)") |>
+    mutate(outcome = all_vars_vsd[i]) #|>
+    #filter(abs(s0) > 0)
+  
+  lasso_coef_b <- lasso_coef_b |>
+    bind_rows(lasso_coef_a)
+  
+  rm(lasso_coef_a)
+}
+
+# why this reducing to 1 observation when can see there are more?!
+lasso_coef <- lasso_coef_b |>
+  filter(abs(s0) > 0)
+```
+
+
+
+\newpage
+# graphical lasso (adjusted correlations)
+## overall
+
+```{r}
+#| label: graphical-lasso-overall
+
+library(glasso)
+
+#ggplot(data=paco, aes(x=villous_surface_density)) + geom_density()
+#ggplot(data=paco, aes(x=villous_volume)) + geom_density()
+
+# first, compute covariance matrix
+covmat_vsd <- paco |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  # Need to do case-wise deletion (remove completely if missing one value)
+  # because need to give a single sample size in glasso function
+  cov(use="complete.obs") 
+ 
+# from https://cran.r-project.org/web/packages/glasso/glasso.pdf
+# s - Covariance matrix:p by p matrix (symmetric)
+
+# rho (Non-negative) - regularization parameter for lasso. rho=0 means no #regularization. Can be a scalar (usual) or a symmetric p by p matrix, or a vector #of length p. In the latter case, the penalty matrix has jkth element sqrt(rho[j]*rho[k]).
+
+# nobs - Number of observations used in computation of the covariance matrix s. This
+#quantity is need to compute the value of log-likelihood. If not specified, loglik
+#will be returned as NA.
+
+glasso_overall <- glasso(s = covmat_vsd
+                         # set to NO regularization to start
+                         # later use cross-validation to choose the reg. param.?
+                         # this returns all nonzero covariance params because 
+                         # no regularization . . .
+                         , rho = 0
+                         , nobs = 86)
+
+glasso_overall
+# glasso documentation says this returns:
+# w - Estimated covariance matrix
+# wi - Estimated inverse covariance matrix
+# loglik - Value of maximized log-likelihood+penalty
+# BUT that doesn't make sense because there are negative values in w and wi!
+
+lambda_set <- c(0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1)
+logliks <- rep(NA, length(lambda_set))
+for (lambda in lambda_set){
+  glasso_overall_l <- glasso(s = covmat_vsd
+                           # set to NO regularization to start
+                           # later use cross-validation to choose the reg. param.?
+                           # this returns all nonzero covariance params because 
+                           # no regularization . . .
+                           , rho = lambda
+                           , nobs = 86)
+  
+  logliks[which(lambda_set==lambda)] <- glasso_overall_l$loglik
+}
+
+logliks
+
+glasso_overall$loglik
+glasso_overall_p1$loglik
+```
+
+\newpage
+# graphical lasso (adjusted correlations)
+## by treatment group
+
+
