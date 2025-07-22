@@ -43,39 +43,31 @@ paco <- read_excel("Data/data for Kat.xlsx")
 
 # define which biomarkers to include
 biomarkers <- paco |>
-  select(ends_with("pg_ml"), shbg_nmol_l) |>
+  select(ends_with("pg_ml"), shbg_nmol_l, "p4_ng_ml") |>
   colnames()
 
-# ends_with("ng_ml")
+# exclude e2_ng_ml b/c be2 is included (and derived from e2) - see email from Lena on 7/15 
 
 # define which placental outcomes to include (separate networks for each)
-placenta_outcomes <- c("villous_surface_density", "villous_volume", "placenta_weight_kg")
+placenta_outcomes <- c("villous_surface_density"
+                       , "villous_volume"
+                       , "bwc"          # need updated data from Lisa
+                       , "pw_centile"   # need updated data from Lisa
+                       , "bw_pw_ratio") # need updated data from Lisa
+
+outc_labels <- c("Villous Surface Density"
+                 , "Villous Volume")
 ```
 
-!!!
-
-ERROR: These partial correlations are NOT CORRECT YET. 
-
-They're based on graphical lasso with the regularization parameter set to 0 (no regularization), so all edges are realized. There is a also a warning given from the glasso function (because of no regularization yet):
-Warning message:
-In glasso(s = covmat, rho = 0, nobs = nrow(dat)) :
-  With rho=0, there may be convergence problems if the input matrix 
- is not of full rank
- 
-They also likely have the WRONG SIGN (+/-). 
-
-Edge and node attributes (colors and connections) will change once fixed.
-
-!!!
 
 ```{r}
-#| label: glasso-a
+#| label: glasso-func
 #| include: false
 
 #ggplot(data=paco, aes(x=villous_surface_density)) + geom_density()
 #ggplot(data=paco, aes(x=villous_volume)) + geom_density()
 
-get_pcorr <- function(outc,grp){
+get_pcorr <- function(outc,grp, rho_param){
   
   all_vars <- c(biomarkers, placenta_outcomes[outc])
  
@@ -96,6 +88,8 @@ get_pcorr <- function(outc,grp){
   }  
   
   covmat <- dat |>
+    scale() |>
+    as_tibble() |>
     cov(use="complete.obs") 
   
   print(nrow(dat))
@@ -117,7 +111,7 @@ get_pcorr <- function(outc,grp){
                    # later use cross-validation to choose the reg. param.?
                    # this returns all nonzero covariance params because
                    # no regularization . . .
-                   , rho = 0
+                   , rho = rho_param
                    , nobs = nrow(dat))
 
   # (3.) compute the partial correlation from the glasso function output
@@ -131,10 +125,11 @@ get_pcorr <- function(outc,grp){
   n_vars <- length(all_vars)
   inv_sig <- glasso_fit$wi
   variance_diag <- diag(diag(inv_sig), n_vars, n_vars)
-  #print(inv_sig)
-  #print(variance_diag)
   
-  pcorrs <- sqrt(solve(variance_diag)) %*% inv_sig %*% sqrt(solve(variance_diag))
+  # https://online.stat.psu.edu/stat505/book/export/html/638
+  # https://kongres2025.stat.gov.pl/Content/Docs/Prezentacje/Sess3/01%20-%20mbogdan.pdf
+  # (slide 37)
+  pcorrs <- -sqrt(solve(variance_diag)) %*% inv_sig %*% sqrt(solve(variance_diag))
   print(pcorrs)
   
   # (4.) Create the network object
@@ -143,7 +138,9 @@ get_pcorr <- function(outc,grp){
     as_tibble() |>
     mutate(var1 = all_vars) |>
     pivot_longer(cols=-var1, names_to="var2", values_to="pcorr") |>
-    filter(var1 < var2)
+    filter(var1 < var2) |>
+    # remove edges where the partial corr has been reduced to 0
+    filter(pcorr != 0)
   
   print(min(pcorrs_network0$pcorr))
   print(max(pcorrs_network0$pcorr))
@@ -159,39 +156,56 @@ get_pcorr <- function(outc,grp){
                 filter(var1 == placenta_outcomes[outc] | 
                          var2 == placenta_outcomes[outc]) |>
                 select(var1, pcorr_outcome=pcorr)
-              , by=c("name"="var1"))
+              , by=c("name"="var1")) |>
+    mutate(name_short = str_extract(name, "[^_]+"))
 
   # (5.) Create the network visualization 
   pcorrs_viz <- ggraph(pcorrs_network) + 
-    geom_edge_link(aes(edge_color = pcorr)) + #, edge_alpha = 0.8, ) + 
+    geom_edge_link(aes(edge_color = pcorr
+                       , edge_width = abs(pcorr))) + #, edge_alpha = 0.8, ) + 
     geom_node_point(aes(size = abs(pcorr_outcome)
-                        , color = pcorr_outcome)
+                        , color = pcorr_outcome
+                        , shape = (pcorr_outcome > 0))
                     , show.legend = FALSE) +
-    geom_node_text(aes(label = name), repel = TRUE) +
+    geom_node_text(aes(label = name_short), repel = TRUE) +
     # Had to add `base_family` argument due to error with fonts loading for PDF
     theme_graph(base_family = "sans"
                 , caption_size = 10) +
+    theme(legend.key.width = unit(2, "cm")) +
     #labs(title=paste0(outc_labels[outc], ": ", grp)) +
     #labs(title=outc_labels[outc]) +
     labs(caption=grp) +
-    scale_color_distiller(palette="RdYlGn"
+    scale_edge_width(guide="none") +
+    scale_color_distiller(palette="BrBG" #palette="RdYlGn" 
                           , direction=1
-                          , limits=c(-0.7, 0.7)
-                          , breaks=c(-0.7, -0.4, -0.1, 0.1, 0.4, 0.7)) +
-    scale_edge_color_distiller(palette="RdYlGn"
+                          , limits=c(-0.8, 0.8)
+                          , breaks=c(-0.8, -0.4, -0.1, 0.1, 0.4, 0.8)) +
+    scale_edge_color_distiller(palette="BrBG" #palette="RdYlGn" 
                                , direction=1
-                               , limits=c(-0.7, 0.7)
-                               , breaks=c(-0.7, -0.4, -0.1, 0.1, 0.4, 0.7)) 
+                               , limits=c(-0.8, 0.8)
+                               , breaks=c(-0.8, -0.4, -0.1, 0.1, 0.4, 0.8)) +
+    scale_shape_manual(values=c(15, 16))
 
   return(pcorrs_viz)
 }
 
-outc_labels <- c("Villous Surface Density", "Villous Volume", "Placenta Weight")
+```
 
-# THINK STILL RETURNING PCORRS THAT ARE OPPOSITE SIGN THAN SHOULD BE. WHY!?
-plot_vsd_ctrl <- get_pcorr(outc=1, grp="Control") # n = 40
-plot_vsd_INSTI <- get_pcorr(outc=1, grp="INSTI")   # n = 19
-plot_vsd_PrEP <- get_pcorr(outc=1, grp="PrEP")    # n = 27
+<!-- # No regularization (penalty=0), all edges realized-->
+
+```{r}
+#| label: glasso-testing-noreg
+#| include: false
+#| eval: false
+
+plot_vsd_ctrl <- get_pcorr(outc=1, grp="Control", rho_param=0) # n = 40
+plot_vsd_INSTI <- get_pcorr(outc=1, grp="INSTI", rho_param=0)   # n = 19
+plot_vsd_PrEP <- get_pcorr(outc=1, grp="PrEP", rho_param=0)    # n = 27
+
+plot_vv_ctrl <- get_pcorr(outc=2, grp="Control", rho_param=0) # n = 40
+plot_vv_INSTI <- get_pcorr(outc=2, grp="INSTI", rho_param=0)   # n = 19
+plot_vv_PrEP <- get_pcorr(outc=2, grp="PrEP", rho_param=0)    # n = 27
+
 
 # since no regularization, should just equal the partial correlation.
 # but they don't seem to be ... hmmm ... some very off ...
@@ -206,16 +220,162 @@ test_ctrl <- paco |>
 
 print("Partial Correlations from pcor function in ppcor package - control grp:")
 ppcor::pcor(test_ctrl)
+
+test_insti <- paco |>
+  filter(treatment == "INSTI") |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  na.omit()
+
+print("Partial Correlations from pcor function in ppcor package - INSTI grp:")
+ppcor::pcor(test_insti)
 ```
 
 ```{r}
-#| label: glasso-b
+#| label: glasso-noreg-plots
 #| fig-width: 7
 #| fig-height: 10
+#| eval: false
 
 ggarrange(plot_vsd_ctrl, plot_vsd_INSTI, plot_vsd_PrEP
           , nrow = 3
           , common.legend = TRUE
           , legend = "right"
           , labels = c(outc_labels[1], "", ""))
+
+ggarrange(plot_vv_ctrl, plot_vv_INSTI, plot_vv_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[2], "", ""))
+```
+
+```{r}
+#| label: glasso-fits
+#| include: false
+
+rho_values <- c(0, 0.01, 0.05, 0.1, 0.2, 0.25)
+
+control_vsd <- list()
+insti_vsd <- list()
+prep_vsd <- list()
+
+control_vv <- list()
+insti_vv <- list()
+prep_vv <- list()
+
+for (r in rho_values){
+  
+  # ---------------------------- VSD 
+  
+  control_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="Control", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  insti_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="INSTI", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  prep_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="PrEP", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  # ---------------------------- VV
+  
+  control_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="Control", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  insti_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="INSTI", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  prep_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="PrEP", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+}
+
+```
+
+# VSD - Control group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-control
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(control_vsd[[1]], control_vsd[[2]], control_vsd[[3]]
+          , control_vsd[[4]], control_vsd[[5]], control_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VSD - INSTI group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-insti
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(insti_vsd[[1]], insti_vsd[[2]], insti_vsd[[3]]
+          , insti_vsd[[4]], insti_vsd[[5]], insti_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VSD - PrEP group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-prep
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(prep_vsd[[1]], prep_vsd[[2]], prep_vsd[[3]]
+          , prep_vsd[[4]], prep_vsd[[5]], prep_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VV - Control group, with different penalties 
+
+```{r}
+#| label: glasso-vv-control
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(control_vv[[1]], control_vv[[2]], control_vv[[3]]
+          , control_vv[[4]], control_vv[[5]], control_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
+```
+
+# VV - INSTI group, with different penalties 
+
+```{r}
+#| label: glasso-vv-insti
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(insti_vv[[1]], insti_vv[[2]], insti_vv[[3]]
+          , insti_vv[[4]], insti_vv[[5]], insti_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
+```
+
+# VV - PrEP group, with different penalties 
+
+```{r}
+#| label: glasso-vv-prep
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(prep_vv[[1]], prep_vv[[2]], prep_vv[[3]]
+          , prep_vv[[4]], prep_vv[[5]], prep_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
 ```
