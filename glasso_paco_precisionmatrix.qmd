@@ -1,0 +1,357 @@
+---
+title: "glasso (precision matrix version)"
+format: pdf
+header-includes: 
+- \usepackage{booktabs}
+- \usepackage{longtable}
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| eval: true
+
+# author: kat 
+# date: 07/22/2025
+# purpose: fit graphical lasso to create network visualization based on 
+#              precision matrix for biomarkers and placenta outcomes
+
+
+knitr::opts_chunk$set(eval=TRUE
+                      , echo=FALSE
+                      , message=FALSE
+                      , warning=FALSE)
+#rm(list=ls())
+
+library(readxl)
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggpubr)
+library(glasso)
+
+options(knitr.kable.NA = '--')
+```
+
+```{r}
+#| label: import-dat
+
+paco <- read_excel("Data/data for Kat.xlsx")
+
+# define which biomarkers to include
+biomarkers <- paco |>
+  select(ends_with("pg_ml"), shbg_nmol_l, "p4_ng_ml") |>
+  colnames()
+
+# exclude e2_ng_ml b/c be2 is included (and derived from e2) - see email from Lena on 7/15 
+
+# define which placental outcomes to include (separate networks for each)
+placenta_outcomes <- c("villous_surface_density"
+                       , "villous_volume"
+                       , "bwc"          # need updated data from Lisa
+                       , "pw_centile"   # need updated data from Lisa
+                       , "bw_pw_ratio") # need updated data from Lisa
+
+outc_labels <- c("Villous Surface Density"
+                 , "Villous Volume")
+```
+
+
+```{r}
+#| label: glasso-func
+#| include: false
+
+get_precision <- function(outc,grp, rho_param){
+  
+  all_vars <- c(biomarkers, placenta_outcomes[outc])
+ 
+  # (1.) compute covariance matrix
+  if (is.na(grp)){
+    dat <- paco |>
+      select(all_of(all_vars)) |>
+      # Need to do case-wise deletion (remove completely if missing one value)
+      # because need to give a single sample size in glasso function
+      na.omit()
+  } else {
+    dat <- paco |>
+      filter(treatment == grp) |>
+      select(all_of(all_vars)) |>
+      # Need to do case-wise deletion (remove completely if missing one value)
+      # because need to give a single sample size in glasso function
+      na.omit()
+  }  
+  
+  covmat <- dat |>
+    scale() |>
+    as_tibble() |>
+    cov(use="complete.obs") 
+  
+  print(nrow(dat))
+  
+  # (2.) fit model using glasso function
+  # from https://cran.r-project.org/web/packages/glasso/glasso.pdf
+  # s - Covariance matrix:p by p matrix (symmetric)
+  
+  # rho (Non-negative) - regularization parameter for lasso. rho=0 means no 
+  #regularization. Can be a scalar (usual) or a symmetric p by p matrix, or a vector #of 
+  # length p. In the latter case, the penalty matrix has jkth element sqrt(rho[j]*rho[k]).
+  
+  # nobs - Number of observations used in computation of the covariance matrix s. This
+  #quantity is need to compute the value of log-likelihood. If not specified, loglik
+  #will be returned as NA.
+  
+  glasso_fit <- glasso(s = covmat
+                   # set to NO regularization to start
+                   # later use cross-validation to choose the reg. param.?
+                   # this returns all nonzero covariance params because
+                   # no regularization . . .
+                   , rho = rho_param
+                   , nobs = nrow(dat))
+
+  # (3.) 
+  precision <- glasso_fit$wi
+
+  # (4.) Create the network object
+  colnames(precision) <- all_vars
+  precision_network0 <- precision |>
+    as_tibble() |>
+    mutate(var1 = all_vars) |>
+    pivot_longer(cols=-var1, names_to="var2", values_to="precision") |>
+    filter(var1 < var2) |>
+    # remove edges where precision is 0
+    filter(precision != 0)
+  
+  print(min(precision_network0$precision))
+  print(max(precision_network0$precision))
+  
+  # precision_network <- precision_network0 |>
+  #   # Y is not a node in the graph; rather each biomarker's node will
+  #   # be colored/sized by its partial correlation with Y (so any correlations)
+  #   # with Y are node attributes, NOT edge attributes)
+  #   filter(var1 != placenta_outcomes[outc] & var2 != placenta_outcomes[outc]) |>
+  #   as_tbl_graph(directed = FALSE) |>
+  #   activate(nodes) |>
+  #   left_join(precision_network0 |>
+  #               filter(var1 == placenta_outcomes[outc] | 
+  #                        var2 == placenta_outcomes[outc]) |>
+  #               select(var1, precision_outcome=precision)
+  #             , by=c("name"="var1")) |>
+  #   mutate(name_short = str_extract(name, "[^_]+"))
+  
+  # just make the outcome another node like any other
+  precision_network <- precision_network0 |>
+    as_tbl_graph(directed = FALSE) |>
+    activate(nodes) |>
+    mutate(name_short = ifelse(name=="villous_surface_density"
+                               , yes="villous surface density"
+                               , no=str_extract(name, "[^_]+")))
+
+
+  # (5.) Create the network visualization 
+  precision_viz <- ggraph(precision_network, layout="circle") + 
+    geom_edge_link() + #, edge_alpha = 0.8, ) + 
+    geom_node_point(shape = 1) +
+    geom_node_label(aes(label = name_short)) +
+    # Had to add `base_family` argument due to error with fonts loading for PDF
+    theme_graph(base_family = "sans"
+                , caption_size = 10)
+    #labs(title=paste0(outc_labels[outc], ": ", grp)) +
+    #labs(title=outc_labels[outc]) +
+    labs(caption=grp) 
+
+  return(precision_viz)
+}
+
+```
+
+<!-- # No regularization (penalty=0), all edges realized-->
+
+```{r}
+#| label: glasso-testing-noreg
+#| include: false
+#| eval: false
+
+# not useful to spot check when rho=0 since all connections will be there ...
+
+plot_vsd_ctrl <- get_precision(outc=1, grp="Control", rho_param=0.1)  # n = 40
+plot_vsd_ctrl_z <- get_precision(outc=1, grp="Control", rho_param=0.3)  # n = 40
+
+plot_vsd_INSTI <- get_precision(outc=1, grp="INSTI", rho_param=0)   # n = 19
+plot_vsd_PrEP <- get_precision(outc=1, grp="PrEP", rho_param=0)     # n = 27
+
+plot_vv_ctrl <- get_precision(outc=2, grp="Control", rho_param=0)  # n = 40
+plot_vv_INSTI <- get_precision(outc=2, grp="INSTI", rho_param=0)   # n = 19
+plot_vv_PrEP <- get_precision(outc=2, grp="PrEP", rho_param=0)     # n = 27
+
+
+# CHECK 
+test_ctrl <- paco |>
+  filter(treatment == "Control") |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  na.omit() |>
+  cov()
+
+glasso(s = test_ctrl, rho = 0.1, nobs = nrow(dat))$wi
+
+# does scaling it change?
+test_ctrl_z <- paco |>
+  filter(treatment == "Control") |>
+  select(all_of(biomarkers), placenta_outcomes[1]) |>
+  na.omit() |>
+  scale() |>
+  cov()
+
+glasso(s = test_ctrl_z, rho = 0.1, nobs = nrow(dat))$wi
+
+```
+
+```{r}
+#| label: glasso-noreg-plots
+#| fig-width: 7
+#| fig-height: 10
+#| eval: false
+
+ggarrange(plot_vsd_ctrl, plot_vsd_INSTI, plot_vsd_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
+
+ggarrange(plot_vv_ctrl, plot_vv_INSTI, plot_vv_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[2], "", ""))
+```
+
+```{r}
+#| label: glasso-fits
+#| include: false
+
+rho_values <- c(0, 0.01, 0.05, 0.1, 0.2, 0.25)
+
+control_vsd <- list()
+insti_vsd <- list()
+prep_vsd <- list()
+
+control_vv <- list()
+insti_vv <- list()
+prep_vv <- list()
+
+for (r in rho_values){
+  
+  # ---------------------------- VSD 
+  
+  control_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="Control", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  insti_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="INSTI", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  prep_vsd[[which(rho_values==r)]] <- get_pcorr(outc=1, grp="PrEP", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  # ---------------------------- VV
+  
+  control_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="Control", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  insti_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="INSTI", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+  
+  prep_vv[[which(rho_values==r)]] <- get_pcorr(outc=2, grp="PrEP", rho_param=r) +
+    labs(subtitle=paste("rho =",r))
+}
+
+```
+
+# VSD - Control group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-control
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(control_vsd[[1]], control_vsd[[2]], control_vsd[[3]]
+          , control_vsd[[4]], control_vsd[[5]], control_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VSD - INSTI group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-insti
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(insti_vsd[[1]], insti_vsd[[2]], insti_vsd[[3]]
+          , insti_vsd[[4]], insti_vsd[[5]], insti_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VSD - PrEP group, with different penalties 
+
+```{r}
+#| label: glasso-vsd-prep
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(prep_vsd[[1]], prep_vsd[[2]], prep_vsd[[3]]
+          , prep_vsd[[4]], prep_vsd[[5]], prep_vsd[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[1], "", "", "", "", ""))
+
+```
+
+# VV - Control group, with different penalties 
+
+```{r}
+#| label: glasso-vv-control
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(control_vv[[1]], control_vv[[2]], control_vv[[3]]
+          , control_vv[[4]], control_vv[[5]], control_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
+```
+
+# VV - INSTI group, with different penalties 
+
+```{r}
+#| label: glasso-vv-insti
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(insti_vv[[1]], insti_vv[[2]], insti_vv[[3]]
+          , insti_vv[[4]], insti_vv[[5]], insti_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
+```
+
+# VV - PrEP group, with different penalties 
+
+```{r}
+#| label: glasso-vv-prep
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(prep_vv[[1]], prep_vv[[2]], prep_vv[[3]]
+          , prep_vv[[4]], prep_vv[[5]], prep_vv[[6]]
+          , common.legend = TRUE, legend="bottom"
+          , nrow=3, ncol=2
+          , labels = c(outc_labels[2], "", "", "", "", ""))
+
+```
