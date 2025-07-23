@@ -32,6 +32,7 @@ library(ggraph)
 library(tidygraph)
 library(ggpubr)
 library(glasso)
+library(iDINGO) # to compute extended BIC for choosing rho parameter in glasso
 
 options(knitr.kable.NA = '--')
 ```
@@ -67,7 +68,7 @@ outc_labels <- c("Villous Surface Density"
 #ggplot(data=paco, aes(x=villous_surface_density)) + geom_density()
 #ggplot(data=paco, aes(x=villous_volume)) + geom_density()
 
-get_pcorr <- function(outc,grp, rho_param){
+get_pcorr <- function(outc,grp){
   
   all_vars <- c(biomarkers, placenta_outcomes[outc])
  
@@ -90,11 +91,27 @@ get_pcorr <- function(outc,grp, rho_param){
   covmat <- dat |>
     scale() |>
     as_tibble() |>
-    cov(use="complete.obs") 
+    cov() 
   
   print(nrow(dat))
   
-  # (2.) fit model using glasso function
+  # (2.) select glasso tuning parameter based on minimizing BIC
+  # https://cran.r-project.org/web/packages/iDINGO/iDINGO.pdf
+  rhoarray <- exp(seq(log(0.01), log(0.5), length = 50))
+  BIC <- rep(0, length(rhoarray))
+  for (rh in 1:length(rhoarray)) {
+    glasso_fit0 <- glasso(s =covmat, rho = rhoarray[rh], nobs = nrow(dat))
+    # https://arxiv.org/pdf/1011.6640
+    # gamma = 0 returns the classic BIC 
+    BIC[rh] <- extendedBIC(gamma = 0, omegahat = glasso_fit0$wi
+                           , S = covmat, n = nrow(dat))
+  }
+  
+  #ggplot(data=data.frame(x=rhoarray, y=BIC), aes(x=x,y=y)) + geom_point()
+  rho_opt <- rhoarray[which.min(BIC)]
+  print(rho_opt)
+  
+  # (3.) fit final model using glasso function
   # from https://cran.r-project.org/web/packages/glasso/glasso.pdf
   # s - Covariance matrix:p by p matrix (symmetric)
   
@@ -111,10 +128,10 @@ get_pcorr <- function(outc,grp, rho_param){
                    # later use cross-validation to choose the reg. param.?
                    # this returns all nonzero covariance params because
                    # no regularization . . .
-                   , rho = rho_param
+                   , rho = rho_opt
                    , nobs = nrow(dat))
 
-  # (3.) compute the partial correlation from the glasso function output
+  # (4.) compute the partial correlation from the glasso function output
   # glasso documentation says this function returns:
   # w - Estimated covariance matrix  
   # wi - Estimated inverse covariance matrix
@@ -138,9 +155,7 @@ get_pcorr <- function(outc,grp, rho_param){
     as_tibble() |>
     mutate(var1 = all_vars) |>
     pivot_longer(cols=-var1, names_to="var2", values_to="pcorr") |>
-    filter(var1 < var2) |>
-    # remove edges where the partial corr has been reduced to 0
-    filter(pcorr != 0)
+    filter(var1 < var2) 
   
   print(min(pcorrs_network0$pcorr))
   print(max(pcorrs_network0$pcorr))
@@ -157,34 +172,38 @@ get_pcorr <- function(outc,grp, rho_param){
                          var2 == placenta_outcomes[outc]) |>
                 select(var1, pcorr_outcome=pcorr)
               , by=c("name"="var1")) |>
-    mutate(name_short = str_extract(name, "[^_]+"))
+    mutate(name_short = str_extract(name, "[^_]+")) |>
+    activate(edges) |>
+    # remove edges where the partial corr has been reduced to 0
+    filter(pcorr != 0)
 
   # (5.) Create the network visualization 
   pcorrs_viz <- ggraph(pcorrs_network) + 
     geom_edge_link(aes(edge_color = pcorr
                        , edge_width = abs(pcorr))) + #, edge_alpha = 0.8, ) + 
     geom_node_point(aes(size = abs(pcorr_outcome)
-                        , color = pcorr_outcome
+                        , fill = pcorr_outcome
                         , shape = (pcorr_outcome > 0))
+                    , color = "black"
                     , show.legend = FALSE) +
     geom_node_text(aes(label = name_short), repel = TRUE) +
     # Had to add `base_family` argument due to error with fonts loading for PDF
     theme_graph(base_family = "sans"
                 , caption_size = 10) +
-    theme(legend.key.width = unit(2, "cm")) +
+    #theme(legend.key.width = unit(2, "cm")) +
     #labs(title=paste0(outc_labels[outc], ": ", grp)) +
     #labs(title=outc_labels[outc]) +
-    labs(caption=grp) +
+    labs(caption=paste0(grp, "\n (rho = ", round(rho_opt,3), ")")) +
     scale_edge_width(guide="none") +
-    scale_color_distiller(palette="BrBG" #palette="RdYlGn" 
+    scale_fill_distiller(palette="BrBG" #palette="RdYlGn" 
                           , direction=1
-                          , limits=c(-0.8, 0.8)
-                          , breaks=c(-0.8, -0.4, -0.1, 0.1, 0.4, 0.8)) +
+                          , limits=c(-0.6, 0.6)
+                          , breaks=c(-0.6, -0.3, 0, 0.3, 0.6)) +
     scale_edge_color_distiller(palette="BrBG" #palette="RdYlGn" 
                                , direction=1
-                               , limits=c(-0.8, 0.8)
-                               , breaks=c(-0.8, -0.4, -0.1, 0.1, 0.4, 0.8)) +
-    scale_shape_manual(values=c(15, 16))
+                               , limits=c(-0.6, 0.6)
+                               , breaks=c(-0.6, -0.3, 0, 0.3, 0.6)) +
+    scale_shape_manual(values=c(22,21))
 
   return(pcorrs_viz)
 }
@@ -252,6 +271,7 @@ ggarrange(plot_vv_ctrl, plot_vv_INSTI, plot_vv_PrEP
 ```{r}
 #| label: glasso-fits
 #| include: false
+#| eval: false
 
 rho_values <- c(0, 0.01, 0.05, 0.1, 0.2, 0.25)
 
@@ -290,92 +310,49 @@ for (r in rho_values){
 
 ```
 
-# VSD - Control group, with different penalties 
-
 ```{r}
-#| label: glasso-vsd-control
-#| fig-width: 8
-#| fig-height: 11
+#| label: glasso-fits-opt
+#| include: false
 
-ggarrange(control_vsd[[1]], control_vsd[[2]], control_vsd[[3]]
-          , control_vsd[[4]], control_vsd[[5]], control_vsd[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[1], "", "", "", "", ""))
+plot_vsd_ctrl <- get_pcorr(outc=1, grp="Control") # n = 40
+plot_vsd_INSTI <- get_pcorr(outc=1, grp="INSTI")  # n = 19
+plot_vsd_PrEP <- get_pcorr(outc=1, grp="PrEP")    # n = 27
 
+plot_vv_ctrl <- get_pcorr(outc=2, grp="Control") # n = 40
+plot_vv_INSTI <- get_pcorr(outc=2, grp="INSTI")  # n = 19
+plot_vv_PrEP <- get_pcorr(outc=2, grp="PrEP")    # n = 27
 ```
 
-# VSD - INSTI group, with different penalties 
+# VSD
 
 ```{r}
-#| label: glasso-vsd-insti
+#| label: glasso-vsd-opt-plot
 #| fig-width: 8
 #| fig-height: 11
 
-ggarrange(insti_vsd[[1]], insti_vsd[[2]], insti_vsd[[3]]
-          , insti_vsd[[4]], insti_vsd[[5]], insti_vsd[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[1], "", "", "", "", ""))
+# ggarrange(control_vsd[[1]], control_vsd[[2]], control_vsd[[3]]
+#           , control_vsd[[4]], control_vsd[[5]], control_vsd[[6]]
+#           , common.legend = TRUE, legend="bottom"
+#           , nrow=3, ncol=2
+#           , labels = c(outc_labels[1], "", "", "", "", ""))
 
+ggarrange(plot_vsd_ctrl, plot_vsd_INSTI, plot_vsd_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
 ```
 
-# VSD - PrEP group, with different penalties 
+# VV
 
 ```{r}
-#| label: glasso-vsd-prep
+#| label: glasso-vv-opt-plot
 #| fig-width: 8
 #| fig-height: 11
 
-ggarrange(prep_vsd[[1]], prep_vsd[[2]], prep_vsd[[3]]
-          , prep_vsd[[4]], prep_vsd[[5]], prep_vsd[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[1], "", "", "", "", ""))
-
-```
-
-# VV - Control group, with different penalties 
-
-```{r}
-#| label: glasso-vv-control
-#| fig-width: 8
-#| fig-height: 11
-
-ggarrange(control_vv[[1]], control_vv[[2]], control_vv[[3]]
-          , control_vv[[4]], control_vv[[5]], control_vv[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[2], "", "", "", "", ""))
-
-```
-
-# VV - INSTI group, with different penalties 
-
-```{r}
-#| label: glasso-vv-insti
-#| fig-width: 8
-#| fig-height: 11
-
-ggarrange(insti_vv[[1]], insti_vv[[2]], insti_vv[[3]]
-          , insti_vv[[4]], insti_vv[[5]], insti_vv[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[2], "", "", "", "", ""))
-
-```
-
-# VV - PrEP group, with different penalties 
-
-```{r}
-#| label: glasso-vv-prep
-#| fig-width: 8
-#| fig-height: 11
-
-ggarrange(prep_vv[[1]], prep_vv[[2]], prep_vv[[3]]
-          , prep_vv[[4]], prep_vv[[5]], prep_vv[[6]]
-          , common.legend = TRUE, legend="bottom"
-          , nrow=3, ncol=2
-          , labels = c(outc_labels[2], "", "", "", "", ""))
-
+ggarrange(plot_vv_ctrl, plot_vv_INSTI, plot_vv_PrEP
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
 ```
