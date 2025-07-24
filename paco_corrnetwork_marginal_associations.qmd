@@ -1,0 +1,220 @@
+---
+title: "PACO correlation networks"
+subtitle: "(MARGINAL associations)"
+format: pdf
+header-includes: 
+- \usepackage{booktabs}
+- \usepackage{longtable}
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| eval: true
+
+# author: kat 
+# date: 07/24/2025
+# purpose: create network visualization of correlations (MARGINAL associations)  
+#               between biomarkers by treatment group
+#               (similar to Jao paper Figure 3)
+#          "In addition, descriptive analyses were employed where a simple Spearman correlation
+#            network was plotted to visualize pairwise correlations between eicosanoids, metabolic
+#            related/inflammatory cytokines, and C-peptide, using a correlation coefficient of 0.4,
+#            corresponding to a medium/large effect size." - Jao pg. 5
+
+knitr::opts_chunk$set(eval=TRUE
+                      , echo=FALSE
+                      , message=FALSE
+                      , warning=FALSE)
+#rm(list=ls())
+
+library(readxl)
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggpubr)
+
+options(knitr.kable.NA = '--')
+```
+
+These network visualizations are based on the Spearman correlation, so reflect marginal (unadjusted) associations. Similar approach as used in Figure 3 in Jao paper (Pediatric Research 2022).
+
+```{r}
+#| label: import-dat
+
+paco <- read_excel("Data/data for Kat.xlsx")
+
+# define which biomarkers to include
+biomarkers <- paco |>
+  select(ends_with("pg_ml"), shbg_nmol_l, "p4_ng_ml") |>
+  colnames()
+
+# exclude e2_ng_ml b/c be2 is included (and derived from e2) - see email from Lena on 7/15 
+
+# define which placental outcomes to include (separate networks for each)
+placenta_outcomes <- c("villous_surface_density"
+                       , "villous_volume"
+                       , "bwc"          # need updated data from Lisa
+                       , "pw_centile"   # need updated data from Lisa
+                       , "bw_pw_ratio") # need updated data from Lisa
+
+outc_labels <- c("Villous Surface Density"
+                 , "Villous Volume")
+```
+
+
+```{r}
+#| label: corr-func
+#| include: false
+
+#ggplot(data=paco, aes(x=villous_surface_density)) + geom_density()
+#ggplot(data=paco, aes(x=villous_volume)) + geom_density()
+
+get_corr <- function(outc,grp, cor_threshold){
+  
+  all_vars <- c(biomarkers, placenta_outcomes[outc])
+ 
+  # (1.) compute Pearson correlation matrix
+  if (is.na(grp)){
+    dat <- paco |>
+      select(all_of(all_vars)) |>
+      # do case-wise deletion (remove completely if missing one value)
+      # so consistent sample as using in glasso function (which requires sample size)
+      na.omit()
+  } else {
+    dat <- paco |>
+      filter(treatment == grp) |>
+      select(all_of(all_vars)) |>
+      # do case-wise deletion (remove completely if missing one value)
+      # so consistent sample as using in glasso function (which requires sample size)
+      na.omit()
+  }  
+  
+  corrmat <- dat |>
+    cor() 
+  
+  # (3.) Create the network object
+  corrs_network0 <- corrmat |>
+    as_tibble() |>
+    mutate(var1 = all_vars) |>
+    pivot_longer(cols=-var1, names_to="var2", values_to="corr") |>
+    filter(var1 < var2) 
+  
+  print(min(corrs_network0$corr))
+  print(max(corrs_network0$corr))
+  
+  corrs_network <- corrs_network0 |>
+    # Y is not a node in the graph; rather each biomarker's node will
+    # be colored/sized by its partial correlation with Y (so any correlations)
+    # with Y are node attributes, NOT edge attributes)
+    filter(var1 != placenta_outcomes[outc] & var2 != placenta_outcomes[outc]) |>
+    as_tbl_graph(directed = FALSE) |>
+    activate(nodes) |>
+    left_join(corrs_network0 |>
+                filter(var1 == placenta_outcomes[outc] | 
+                         var2 == placenta_outcomes[outc]) |>
+                select(var1, corr_outcome=corr)
+              , by=c("name"="var1")) |>
+    mutate(name_short = str_extract(name, "[^_]+")) |>
+    activate(edges) |>
+    # only include edges where corr > 0.4 (like Jao paper)
+    filter(abs(corr) > cor_threshold)
+
+  # (5.) Create the network visualization 
+  corrs_viz <- ggraph(corrs_network, layout="circle") + 
+    geom_edge_link(aes(edge_color = corr
+                       , edge_width = abs(corr))) + #, edge_alpha = 0.8, ) + 
+    geom_node_point(aes(size = abs(corr_outcome)
+                        , fill = corr_outcome
+                        , shape = (corr_outcome > 0))
+                    , color = "black"
+                    , show.legend = FALSE) +
+    geom_node_text(aes(label = name_short), repel = TRUE) +
+    # Had to add `base_family` argument due to error with fonts loading for PDF
+    theme_graph(base_family = "sans"
+                , caption_size = 10) +
+    #theme(legend.key.width = unit(2, "cm")) +
+    #labs(title=paste0(outc_labels[outc], ": ", grp)) +
+    labs(caption=grp) +
+    scale_edge_width(guide="none") +
+    scale_fill_distiller(palette="BrBG" #palette="RdYlGn" 
+                          , direction=1
+                          , limits=c(-0.8, 0.8)
+                          , breaks=c(-0.8, -0.4, 0, 0.4, 0.8)) +
+    scale_edge_color_distiller(palette="BrBG" #palette="RdYlGn" 
+                               , direction=1
+                               , limits=c(-0.8, 0.8)
+                               , breaks=c(-0.8, -0.4, 0, 0.4, 0.8)) +
+    scale_shape_manual(values=c(22,21))
+
+  return(corrs_viz)
+}
+
+```
+
+```{r}
+#| label: run-corr-func-4
+#| include: false
+
+plot_vsd_ctrl4 <- get_corr(outc=1, grp="Control", cor_threshold = 0.4) # n = 40
+plot_vsd_INSTI4 <- get_corr(outc=1, grp="INSTI", cor_threshold = 0.4)  # n = 19
+plot_vsd_PrEP4 <- get_corr(outc=1, grp="PrEP", cor_threshold = 0.4)    # n = 27
+
+plot_vv_ctrl4 <- get_corr(outc=2, grp="Control", cor_threshold = 0.4) # n = 40
+plot_vv_INSTI4 <- get_corr(outc=2, grp="INSTI", cor_threshold = 0.4)  # n = 19
+plot_vv_PrEP4 <- get_corr(outc=2, grp="PrEP", cor_threshold = 0.4)    # n = 27
+```
+
+```{r}
+#| label: run-corr-func-2
+#| include: false
+
+plot_vsd_ctrl2 <- get_corr(outc=1, grp="Control", cor_threshold = 0.2) # n = 40
+plot_vsd_INSTI2 <- get_corr(outc=1, grp="INSTI", cor_threshold = 0.2)  # n = 19
+plot_vsd_PrEP2 <- get_corr(outc=1, grp="PrEP", cor_threshold = 0.2)    # n = 27
+
+plot_vv_ctrl2 <- get_corr(outc=2, grp="Control", cor_threshold = 0.2) # n = 40
+plot_vv_INSTI2 <- get_corr(outc=2, grp="INSTI", cor_threshold = 0.2)  # n = 19
+plot_vv_PrEP2 <- get_corr(outc=2, grp="PrEP", cor_threshold = 0.2)    # n = 27
+```
+
+# Correlation threshold: 0.4
+
+```{r}
+#| label: plot-corr-4
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(plot_vsd_ctrl4, plot_vsd_INSTI4, plot_vsd_PrEP4
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
+
+ggarrange(plot_vv_ctrl4, plot_vv_INSTI4, plot_vv_PrEP4
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[2], "", ""))
+```
+
+# Correlation threshold: 0.2
+
+```{r}
+#| label: plot-corr-2
+#| fig-width: 8
+#| fig-height: 11
+
+ggarrange(plot_vsd_ctrl2, plot_vsd_INSTI2, plot_vsd_PrEP2
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[1], "", ""))
+
+ggarrange(plot_vv_ctrl2, plot_vv_INSTI2, plot_vv_PrEP2
+          , nrow = 3
+          , common.legend = TRUE
+          , legend = "right"
+          , labels = c(outc_labels[2], "", ""))
+```
