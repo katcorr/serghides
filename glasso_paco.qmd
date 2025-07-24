@@ -97,14 +97,20 @@ get_pcorr <- function(outc,grp){
   
   # (2.) select glasso tuning parameter based on minimizing BIC
   # https://cran.r-project.org/web/packages/iDINGO/iDINGO.pdf
-  rhoarray <- exp(seq(log(0.01), log(0.5), length = 50))
+  rhoarray <- exp(seq(log(0.01), log(1), length = 100))
   BIC <- rep(0, length(rhoarray))
   for (rh in 1:length(rhoarray)) {
-    glasso_fit0 <- glasso(s =covmat, rho = rhoarray[rh], nobs = nrow(dat))
+    glasso_fit0 <- glasso(s = covmat, rho = rhoarray[rh], nobs = nrow(dat))
     # https://arxiv.org/pdf/1011.6640
-    # gamma = 0 returns the classic BIC 
-    BIC[rh] <- extendedBIC(gamma = 0, omegahat = glasso_fit0$wi
-                           , S = covmat, n = nrow(dat))
+    # gamma = 0 returns the classic BIC (also mentioned in Shutta et al Stat Med paper) 
+    # BIC[rh] <- extendedBIC(gamma = 0, omegahat = glasso_fit0$wi
+    #                       , S = covmat, n = nrow(dat))
+    
+    num_edges <-  intersect(which(glasso_fit0$wi != 0)
+                            , which(upper.tri(glasso_fit0$wi)==TRUE)) |>
+      length()
+    
+    BIC[rh] <- (-2*glasso_fit0$loglik) + (num_edges*log(nrow(dat)))
   }
   
   #ggplot(data=data.frame(x=rhoarray, y=BIC), aes(x=x,y=y)) + geom_point()
@@ -141,12 +147,11 @@ get_pcorr <- function(outc,grp){
 
   n_vars <- length(all_vars)
   inv_sig <- glasso_fit$wi
-  variance_diag <- diag(diag(inv_sig), n_vars, n_vars)
+  precision_diag <- diag(diag(inv_sig), n_vars, n_vars)
   
-  # https://online.stat.psu.edu/stat505/book/export/html/638
-  # https://kongres2025.stat.gov.pl/Content/Docs/Prezentacje/Sess3/01%20-%20mbogdan.pdf
-  # (slide 37)
-  pcorrs <- -sqrt(solve(variance_diag)) %*% inv_sig %*% sqrt(solve(variance_diag))
+  # Equation 7 from Shutta et al. in Statistics in Medicine 2021 tutorial in biostatistics
+  # "Gaussian graphical models with applications to omics analyses"
+  pcorrs <- -sqrt(solve(precision_diag)) %*% inv_sig %*% sqrt(solve(precision_diag))
   print(pcorrs)
   
   # (4.) Create the network object
