@@ -143,14 +143,20 @@ bic1_idingo <- iDINGO::extendedBIC(gamma = 0, omegahat = fit_gl1$wi,
                                    S = cov, n = nrow(dat)) 
 bic1_idingo
 
-# compute via formula: -2 times log likelihood PLUS
-#                        absolute value of edge set (? |E|) times log(n) PLUS
+# compute via formula: -2*log likelihood PLUS
+##                        |E|*log(n) PLUS
 #                        4*|E|*gamma*log(p)
 # where gamma is a parameter of the *extended* BIC
 # and larger values penalize larger graphs. If gamma is 0
 # then formula reduces to the classic BIC measure.
+# and |E| is the cardinality of the edge set (i.e. the number of edges in the graph)
+# https://en.wikipedia.org/wiki/Cardinality
+# (this formula makes sense/is consistent with the generic BIC formula:
+# https://en.wikipedia.org/wiki/Bayesian_information_criterion)
+# BIC = k*ln(n) - 2*ln({\widehat {L}}), where k is the number of parameters 
+#                                           estimated by the model
 
-absE <- fit_gl1$wi |>
+num_edges <- fit_gl1$wi |>
   as_tibble() |>
   rowid_to_column(var="var1") |>
   mutate(var1 = paste0("V",var1)) |>
@@ -161,23 +167,43 @@ absE <- fit_gl1$wi |>
   filter(value != 0) |>
   ecount() # count number of edges (equivalently, could use the `gsize` function)
 
-bic1_formula <- (-2*fit_gl1$loglik) + (absE*log(nrow(dat)))
+n <- nrow(dat)
+bic1_formula <- (-2*fit_gl1$loglik) + (num_edges*log(n))
 bic1_formula
 
 # hmmm got very different value!
+
+# Gao Statistica Sinica 2012 paper
+# https://en.wikipedia.org/wiki/Determinant
+# https://en.wikipedia.org/wiki/Trace_(linear_algebra)
+bic1_formula_b <- (-n*log(det(fit_gl1$wi))) + (n*sum(diag(fit_gl1$wi%*%fit_gl1$w))) +
+                      (log(n)*num_edges)
+bic1_formula_b
+
+# same Gao paper
+# sounds like EBIC is unnecessary here; for cases where p increases as n increases 
+p <- ncol(cov)
+ebic <- (-n*log(det(fit_gl1$wi))) + (n*sum(diag(fit_gl1$wi%*%fit_gl1$w))) +
+  ((log(n)+4*log(p))*num_edges)
+
+ebic
+
+# well, at least bic1_formula and bic1_formula_b are super close (down to .001)
 
 #BIC to select glasso tuning parameter
 # https://cran.r-project.org/web/packages/iDINGO/iDINGO.pdf
 rhoarray<-exp(seq(log(0.01), log(0.5), length = 20))
 BIC1 <- rep(0, length(rhoarray))
 BIC2 <- rep(0, length(rhoarray))
+BIC3 <- rep(0, length(rhoarray))
+EBIC <- rep(0, length(rhoarray))
 for (rh in 1:length(rhoarray)) {
   fit_gl1 = glasso(cov, rho = rhoarray[rh], nobs = nrow(dat))
   
   BIC1[rh] = iDINGO::extendedBIC(gamma = 0, omegahat = fit_gl1$wi, 
                                 S = cov, n = nrow(dat))
   
-  absE <- fit_gl1$wi |>
+  num_edges <- fit_gl1$wi |>
     as_tibble() |>
     rowid_to_column(var="var1") |>
     mutate(var1 = paste0("V",var1)) |>
@@ -188,15 +214,37 @@ for (rh in 1:length(rhoarray)) {
     filter(value != 0) |>
     ecount() # count number of edges (equivalently, could use the `gsize` function)
   
-  BIC2[rh] <- (-2*fit_gl1$loglik) + (absE*log(nrow(dat)))
+  BIC2[rh] <- (-2*fit_gl1$loglik) + (num_edges*log(n))
+  
+  BIC3[rh] <- (-n*log(det(fit_gl1$wi))) + (n*sum(diag(fit_gl1$wi%*%fit_gl1$w))) +
+    (log(n)*num_edges)
+  
+  EBIC[rh] <- (-n*log(det(fit_gl1$wi))) + (n*sum(diag(fit_gl1$wi%*%fit_gl1$w))) +
+    ((log(n)+4*log(p))*num_edges)
 }
 
 rho1 <- rhoarray[which.min(BIC1)]
 rho1
 rho2 <- rhoarray[which.min(BIC2)]
 rho2
+rho3 <- rhoarray[which.min(BIC3)]
+rho3
+rho4 <- rhoarray[which.min(EBIC)]
+rho4
 
-rho_data <- data.frame(rho=rhoarray, BIC1 = BIC1, BIC2 = BIC2)
+rho_data <- data.frame(rho=rhoarray
+                       , BIC1 = BIC1
+                       , BIC2 = BIC2
+                       , BIC3 = BIC3
+                       , EBIC = EBIC) |>
+  pivot_longer(cols=-rho, names_to = "measure", values_to = "value")
+
+ggplot(data=rho_data, aes(x=rho, y=value, color=measure)) +
+  geom_point() +
+  geom_point(data=rho_data |> 
+               group_by(measure) |> 
+               arrange(value) |>
+               slice(1), size = 2, shape="star")
 
 ggplot() +
   geom_point(data=rho_data, aes(x=rho, y=BIC1)) +
